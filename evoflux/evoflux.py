@@ -1,6 +1,6 @@
 from scipy import stats, linalg
 import numpy as np
-from scipy.special import logsumexp, gammaln
+from scipy.special import logsumexp, gammaln, logit
 from time import time
 from dynesty import NestedSampler
 from multiprocess import Pool, cpu_count
@@ -84,11 +84,81 @@ def multinomial_rvs(counts, p, rng=None):
 
     return out
 
+def initialise_cancer(tau, mu, gamma, nu, zeta, NSIM, rng=None):
+    """
+    Initialise a cancer, assigning fCpG states assuming fCpGs are homozygous 
+    at t=0
+
+    Arguments:
+        tau: age when population began expanding exponentially - float
+        mu: rate to transition from homozygous demethylated to heterozygous
+            - float >= 0
+        gamma: rate to transition from homozygous methylated to heterozygous
+            - float >= 0
+        nu: rate to transition from heterozygous to homozygous methylated
+            - float >= 0
+        zeta: rate to transition from heterozygous to homozygous demethylated
+            - float >= 0         
+        NSIM: number of fCpG loci to simulate - int
+        rng: np.random.default_rng() object, Optional
+    Returns:
+        m_cancer, k_cancer, w_cancer: number of homo meth, hetet meth and 
+                homo unmeth cells in the population - np.array[int]
+    """
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    # assume fCpG's are homozygous methylated at t=0
+    mkw = np.zeros((3, NSIM), dtype = int)
+    idx = np.arange(NSIM)
+    np.random.shuffle(idx)
+    mkw[0, idx[:NSIM//2]] = 1
+    mkw[2, idx[NSIM//2:]] = 1
+
+    # generate distribution of fCpG loci when population begins growing 
+    # at t=tau
+    RateMatrix = np.array([[-2*gamma, nu, 0], 
+                            [2*gamma, -(nu+zeta), 2*mu], 
+                            [0, zeta, -2*mu]])
+
+    ProbStates = linalg.expm(RateMatrix * tau) @ mkw
+
+    m_cancer, k_cancer, w_cancer = multinomial_rvs(1, ProbStates, rng)
+
+    return m_cancer, k_cancer, w_cancer
+
+def grow_cancer(m_cancer, k_cancer, w_cancer, S_cancer_i, S_cancer_iPlus1, rng):
+    """
+    Grow a cancer, assigning fCpG states according to a multinomial ditribution
+
+    Arguments:
+        m_cancer, k_cancer, w_cancer: number of homo meth, hetet meth and 
+                homo unmeth cells in the population - np.array[int]
+        S_cancer_i: number of cells at time t - int = m_cancer + k_cancer + w_cancer
+        S_cancer_iPlus1: number of cells at time t+dt - int >= S_cancer_i
+        rng: np.random.default_rng() object, Optional
+    Returns:
+        Updated m_cancer, k_cancer, w_cancer
+    """
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    if S_cancer_iPlus1 - S_cancer_i > 0:
+        prob_matrix = np.stack((m_cancer, k_cancer, w_cancer)) / S_cancer_i
+        growth = multinomial_rvs(S_cancer_iPlus1 - S_cancer_i, prob_matrix, rng)
+
+        m_cancer += growth[0, :]
+        k_cancer += growth[1, :]
+        w_cancer += growth[2, :]
+
+    return m_cancer, k_cancer, w_cancer
 
 def stochastic_growth(theta, tau, mu, gamma, nu, zeta, T, NSIM):
     """
     Simulate the methylation distribution of fCpG loci for an exponentially 
-    growing well-mixed population
+    growing well-mixed population evolving neutrally
 
     Arguments:
         theta: exponential growth rate of population - float
@@ -104,7 +174,7 @@ def stochastic_growth(theta, tau, mu, gamma, nu, zeta, T, NSIM):
         T: patient's age - float
         NSIM: number of fCpG loci to simulate - int
     Returns:
-        fCpG methylation distribution
+        betaCancer: fCpG methylation fraction distribution - np.array[float]
     """
 
     # calculate the time step so all transition probabilities are <= 10%
@@ -124,37 +194,21 @@ def stochastic_growth(theta, tau, mu, gamma, nu, zeta, T, NSIM):
 
     if np.any(S_cancer < 0):
         raise(OverflowError('overflow encountered for S_cancer'))
-    
-    # assume fCpG's are homozygous methylated at t=0
-    mkw = np.zeros((3, NSIM), dtype = int)
-    idx = np.arange(NSIM)
-    np.random.shuffle(idx)
-    mkw[0, idx[:NSIM//2]] = 1
-    mkw[2, idx[NSIM//2:]] = 1
 
-    # generate distribution of fCpG loci when population begins growing 
-    # at t=tau
     rng = np.random.default_rng()
 
-    RateMatrix = np.array([[-2*gamma, nu, 0], 
-                            [2*gamma, -(nu+zeta), 2*mu], 
-                            [0, zeta, -2*mu]])
-
-    ProbStates = linalg.expm(RateMatrix * tau) @ mkw
-
-    m_cancer, k_cancer, w_cancer = multinomial_rvs(1, ProbStates, rng)
+    # generate distribution of fCpG loci when population begins growing 
+    # at t=tau, assuming fCpG's are homozygous methylated at t=0
+    m_cancer, k_cancer, w_cancer = initialise_cancer(tau, mu, gamma, nu, zeta, 
+                                                     NSIM, rng)
 
     # simulate changes to methylation distribution by splitting the process 
     # into 2 phases, an exponential growth phase and a methylation transition 
     # phase
     for i in range(len(t)-1):
-        if S_cancer[i+1] - S_cancer[i] > 0:
-            prob_matrix = np.stack((m_cancer, k_cancer, w_cancer)) / S_cancer[i]
-            growth = multinomial_rvs(S_cancer[i+1] - S_cancer[i], prob_matrix, rng)
-
-            m_cancer += growth[0, :]
-            k_cancer += growth[1, :]
-            w_cancer += growth[2, :]
+        m_cancer, k_cancer, w_cancer = grow_cancer(m_cancer, k_cancer,
+                                                    w_cancer, S_cancer[i], 
+                                                    S_cancer[i+1], rng)
 
         m_cancer, k_cancer, w_cancer = generate_next_timepoint(m_cancer, 
                                                     k_cancer, w_cancer, 
@@ -165,7 +219,224 @@ def stochastic_growth(theta, tau, mu, gamma, nu, zeta, T, NSIM):
     with np.errstate(divide='raise', over='raise'):
         betaCancer = (k_cancer + 2*m_cancer) / (2*S_cancer[-1])
 
-    # betaCancer = (k_cancer + 2*m_cancer) / (2*S_cancer[-1])
+    return betaCancer
+
+
+
+def stochastic_growth_subclonal(theta1, theta2, tau1, tau2, mu,
+                                gamma, nu, zeta, T, NSIM):
+    """
+    Simulate the methylation distribution of fCpG loci for an exponentially 
+    growing well-mixed population evolving with an expanding subclone
+
+    Arguments:
+        theta1: exponential growth rate of base population - float
+        theta2: exponential growth rate of fitter subclone - float
+        tau1: age when population began expanding exponentially - float < T
+        tau2: age when subclone began expanding - float < T, > tau1
+        mu: rate to transition from homozygous demethylated to heterozygous
+            - float >= 0
+        gamma: rate to transition from homozygous methylated to heterozygous
+            - float >= 0
+        nu: rate to transition from heterozygous to homozygous methylated
+            - float >= 0
+        zeta: rate to transition from heterozygous to homozygous demethylated
+            - float >= 0         
+        T: patient's age - float
+        NSIM: number of fCpG loci to simulate - int
+    Returns:
+        betaCancer: fCpG methylation fraction distribution - np.array[float]
+    """
+
+    dt_max1 = 0.1 / np.max((
+        2*gamma, 
+        2*mu,
+        2*nu,
+        2*zeta,
+        theta1)
+    )
+
+    dt_max2 = 0.1 / np.max((
+        2*gamma, 
+        2*mu,
+        2*nu,
+        2*zeta,
+        theta2)
+    )
+    
+    n1, n2 = int((tau2-tau1) / dt_max1) + 2, int((T-tau2) / dt_max2) + 2  # Number of time steps.
+    t1, t2 = np.linspace(tau1, tau2, n1), np.linspace(tau2, T, n2) 
+    dt1, dt2 = t1[1] - t1[0], t2[1] - t2[0]
+    S_cancer = np.exp(theta1 * (t1-tau1)).astype(int)
+    S_cancer1 = np.exp(theta1 * (t2-tau1)).astype(int)
+    S_cancer2 = np.exp(theta2 * (t2-tau2)).astype(int)
+
+    if np.any(S_cancer1 <= 0):
+        raise OverflowError("The number of cells has overflowed")  
+
+    rng = np.random.default_rng()
+
+    # generate distribution of fCpG loci when population begins growing 
+    # at t=tau, assuming fCpG's are homozygous methylated at t=0
+    m_cancer1, k_cancer1, w_cancer1 = initialise_cancer(tau1, mu, gamma, nu, zeta, 
+                                                     NSIM, rng)
+
+    # simulate changes to methylation distribution by splitting the process 
+    # into 2 phases, an exponential growth phase and a methylation transition 
+    # phase
+    for i in range(len(t1)-1):
+        m_cancer1, k_cancer1, w_cancer1 = grow_cancer(m_cancer1, k_cancer1,
+                                                    w_cancer1, S_cancer[i], 
+                                                    S_cancer[i+1], rng)
+
+        m_cancer1, k_cancer1, w_cancer1 = generate_next_timepoint(m_cancer1, 
+                                                    k_cancer1, w_cancer1, 
+                                                    mu, gamma, nu, zeta,
+                                                    S_cancer[i+1], dt1, rng)
+
+    prob_matrix = np.stack((m_cancer1, k_cancer1, w_cancer1)) / S_cancer[-1]
+    m_cancer2, k_cancer2, w_cancer2 = multinomial_rvs(1, prob_matrix, rng)
+
+    for i in range(len(t2)-1):
+        m_cancer1, k_cancer1, w_cancer1 = grow_cancer(m_cancer1, k_cancer1,
+                                            w_cancer1, S_cancer1[i], 
+                                            S_cancer1[i+1], rng)
+
+
+        m_cancer2, k_cancer2, w_cancer2 = grow_cancer(m_cancer2, k_cancer2,
+                                            w_cancer2, S_cancer2[i], 
+                                            S_cancer2[i+1], rng)
+
+        m_cancer1, k_cancer1, w_cancer1 = generate_next_timepoint(m_cancer1, 
+                                                    k_cancer1, w_cancer1, 
+                                                    mu, gamma, nu, zeta,
+                                                    S_cancer1[i+1], dt2, rng)
+
+        m_cancer2, k_cancer2, w_cancer2 = generate_next_timepoint(m_cancer2, 
+                                                    k_cancer2, w_cancer2, 
+                                                    mu, gamma, nu, zeta,
+                                                    S_cancer2[i+1], dt2, rng)
+
+    with np.errstate(divide='raise', over='raise'):
+        betaCancer = ((k_cancer1 + k_cancer2 + 2*m_cancer1 + 2*m_cancer2) / 
+                        (2*S_cancer1[-1] + 2*S_cancer2[-1]))
+
+    return betaCancer
+
+def stochastic_growth_independent(theta1, theta2, tau1, tau2, mu1, gamma1, 
+                        nu1, zeta1, mu2, gamma2, nu2, zeta2, T, NSIM):
+    """
+    Simulate the methylation distribution of fCpG loci for 2 independent
+    exponentially growing well-mixed populations
+
+    Arguments:
+        theta1: exponential growth rate of base population - float
+        theta2: exponential growth rate of fitter second cancer - float
+        tau1: age when population began expanding exponentially - float < T
+        tau2: age when second cancer began expanding - float < T, > tau1
+        mu1: rate to transition from homozygous demethylated to heterozygous 
+                in cancer 1 - float >= 0
+        gamma1: rate to transition from homozygous methylated to heterozygous
+                in cancer 1  - float >= 0
+        nu1: rate to transition from heterozygous to homozygous methylated
+                in cancer 1 - float >= 0
+        zeta1: rate to transition from heterozygous to homozygous demethylated
+                in cancer 1 - float >= 0  
+        mu2: rate to transition from homozygous demethylated to heterozygous 
+                in cancer 2 - float >= 0
+        gamma2: rate to transition from homozygous methylated to heterozygous
+                in cancer 2  - float >= 0
+        nu2: rate to transition from heterozygous to homozygous methylated
+                in cancer 2 - float >= 0
+        zeta2: rate to transition from heterozygous to homozygous demethylated
+                in cancer 2 - float >= 0  
+        T: patient's age - float
+        NSIM: number of fCpG loci to simulate - int
+    Returns:
+        betaCancer: fCpG methylation fraction distribution - np.array[float]
+    """
+
+    dt_max1 = 0.1 / np.max((
+        2*gamma1, 
+        2*mu1,
+        2*nu1,
+        2*zeta1,
+        theta1)
+    )
+
+    dt_max2 = 0.1 / np.max((
+        2*gamma1, 
+        2*mu1,
+        2*nu1,
+        2*zeta1,
+        2*gamma2, 
+        2*mu2,
+        2*nu2,
+        2*zeta2,
+        theta2)
+    )
+    
+    n1, n2 = int((tau2-tau1) / dt_max1) + 2, int((T-tau2) / dt_max2) + 2  # Number of time steps.
+    t1, t2 = np.linspace(tau1, tau2, n1), np.linspace(tau2, T, n2) 
+    dt1, dt2 = t1[1] - t1[0], t2[1] - t2[0]
+    S_cancer = np.exp(theta1 * (t1-tau1)).astype(int)
+    S_cancer1 = np.exp(theta1 * (t2-tau1)).astype(int)
+    S_cancer2 = np.exp(theta2 * (t2-tau2)).astype(int)
+
+    if np.any(S_cancer1 <= 0):
+        raise OverflowError("The number of cells has overflowed")  
+
+    rng = np.random.default_rng()
+
+    # generate distribution of fCpG loci when population begins growing 
+    # at t=tau, assuming fCpG's are homozygous methylated at t=0
+    m_cancer1, k_cancer1, w_cancer1 = initialise_cancer(tau1, mu1, gamma1, nu1, 
+                                                    zeta1, NSIM, rng)
+
+    # simulate changes to methylation distribution by splitting the process 
+    # into 2 phases, an exponential growth phase and a methylation transition 
+    # phase
+    for i in range(len(t1)-1):
+        m_cancer1, k_cancer1, w_cancer1 = grow_cancer(m_cancer1, k_cancer1,
+                                                    w_cancer1, S_cancer[i], 
+                                                    S_cancer[i+1], rng)
+
+        m_cancer1, k_cancer1, w_cancer1 = generate_next_timepoint(m_cancer1, 
+                                                    k_cancer1, w_cancer1, 
+                                                    mu1, gamma1, nu1, zeta1,
+                                                    S_cancer[i+1], dt1, rng)
+
+    # generate distribution of fCpG loci when population begins growing 
+    # at t=tau, assuming fCpG's are homozygous methylated at t=0
+    m_cancer2, k_cancer2, w_cancer2 = initialise_cancer(tau2, mu2, gamma2, nu2,
+                                                    zeta2, NSIM, rng)
+
+    # simulate changes to methylation distribution by splitting the process 
+    # into 2 phases, an exponential growth phase and a methylation transition 
+    # phase
+    for i in range(len(t2)-1):
+        m_cancer1, k_cancer1, w_cancer1 = grow_cancer(m_cancer1, k_cancer1,
+                                            w_cancer1, S_cancer1[i], 
+                                            S_cancer1[i+1], rng)
+
+
+        m_cancer2, k_cancer2, w_cancer2 = grow_cancer(m_cancer2, k_cancer2,
+                                            w_cancer2, S_cancer2[i], 
+                                            S_cancer2[i+1], rng)
+
+        m_cancer1, k_cancer1, w_cancer1 = generate_next_timepoint(m_cancer1, 
+                                                    k_cancer1, w_cancer1, 
+                                                    mu1, gamma1, nu1, zeta1,
+                                                    S_cancer1[i+1], dt2, rng)
+
+        m_cancer2, k_cancer2, w_cancer2 = generate_next_timepoint(m_cancer2, 
+                                                    k_cancer2, w_cancer2, 
+                                                    mu2, gamma2, nu2, zeta2,
+                                                    S_cancer2[i+1], dt2, rng)
+
+    with np.errstate(divide='raise', over='raise'):
+        betaCancer = ((k_cancer1 + k_cancer2 + 2*m_cancer1 + 2*m_cancer2) / 
+                        (2*S_cancer1[-1] + 2*S_cancer2[-1]))
 
     return betaCancer
 
@@ -309,11 +580,11 @@ def beta_lpdf(y, alpha, beta):
 
     return lpk
 
-def loglikelihood_perpoint(y, theta, rho, tau_rel, mu, gamma, nu_rel, zeta_rel,
+def loglikelihood_perpoint_neutral(y, theta, rho, tau_rel, mu, gamma, nu_rel, zeta_rel,
                             betaContam, delta, eta, kappa, 
                             T, Smin, Smax, NSIM):
     """
-    Estimates the loglikelhood value per datapoint y 
+    Estimates the loglikelhood value per datapoint y assuming a neutral model
 
     Arguments:
         y: fCpG methyaltion data - array of floats
@@ -347,6 +618,10 @@ def loglikelihood_perpoint(y, theta, rho, tau_rel, mu, gamma, nu_rel, zeta_rel,
 
     # # calucalate p(z| mu, gamma)
 
+    Stot = np.exp(theta * (T-tau))
+    if Stot >= np.iinfo(int).max:
+        raise OverflowError("The number of cells will overflow")
+
     betaCancer = stochastic_growth(theta, tau, mu, gamma, 
                                 nu, zeta, T, NSIM)
     betaProb = simulate_contamination(betaCancer, rho, betaContam)
@@ -362,8 +637,8 @@ def loglikelihood_perpoint(y, theta, rho, tau_rel, mu, gamma, nu_rel, zeta_rel,
     lpk = beta_lpdf(y, alpha, beta)
 
     # calculate penalisation that limits the final tumour size to realistic ranges
-    logPenalise = logsumexp([-Smin * np.exp(-theta * (T-tau)), 
-                                -Smax * np.exp(-theta * (T-tau))], 
+    logPenalise = logsumexp([-Smin / Stot, 
+                                -Smax / Stot], 
                             b=[1, -1])
 
     # this is a biased estimator of the LL due to having a finite NSIM, so 
@@ -377,9 +652,10 @@ def loglikelihood_perpoint(y, theta, rho, tau_rel, mu, gamma, nu_rel, zeta_rel,
 
     return LL
 
-def loglikelihood(y, params, constants):
+def loglikelihood_neutral(y, params, constants):
     """
     Estimates the loglikelhood value for fCpG methylation values, y 
+    assuming a neutral model
 
     Arguments:
         y: fCpG methyaltion data - array of floats
@@ -388,19 +664,243 @@ def loglikelihood(y, params, constants):
     Returns:
         Log likelihood at a given set of parameters
     """
-    theta, tau_rel, mu, gamma, nu_rel, zeta_rel, betaContam, delta, eta, kappa = params
+    (theta, tau_rel, mu, gamma, nu_rel, zeta_rel, betaContam, delta,
+                                        eta, kappa) = params
     rho, T, Smin, Smax, NSIM = constants
 
     try:
-        LL = np.sum(loglikelihood_perpoint(y, theta, rho, tau_rel, mu, gamma,
-                            nu_rel, zeta_rel, betaContam, delta, 
-                            eta, kappa, T, Smin, Smax, NSIM))
+        LL = np.sum(loglikelihood_perpoint_neutral(y, theta, rho, 
+                            tau_rel, mu, gamma, nu_rel, zeta_rel, 
+                            betaContam, delta, eta, kappa, T, Smin,
+                            Smax, NSIM))
     except (ValueError, OverflowError, FloatingPointError) as e:
         LL = -np.inf
 
     return LL
 
-def generate_data(params, constants):
+def loglikelihood_perpoint_subclonal(y, theta1, theta2_rel, frac, rho, 
+                            tau1_rel, mu, gamma, nu_rel, 
+                            zeta_rel, contam_meth, 
+                            delta, eta, kappa, T, Smin, 
+                            Smax, NSIM):
+    """
+    Estimates the loglikelhood value per datapoint y assuming an independent model
+
+    Arguments:
+        y: fCpG methyaltion data - array of floats
+        theta: exponential growth rate of population - float
+        rho: tumour purity - float
+        tau_rel: relativeage when population began expanding exponentially 
+                - float < 1
+        mu: rate to transition from homozygous demethylated to heterozygous
+            - float >= 0
+        gamma: rate to transition from homozygous methylated to heterozygous
+            - float >= 0
+        nu_rel: relative rate to transition from heterozygous to homozygous 
+            methylated compared to mu - float >= 0
+        zeta_rel: relative rate to transition from heterozygous to homozygous 
+            demethylated compared to gamma - float >= 0  
+        betaContam: average methylation of non-tumour cells - float
+        delta: offset from zero - float
+        eta: offset from 1 - float
+        kappa: dispersion of beta distributed noise - float > 0
+        T: patient's age - float
+        Smin: minimum allowed tumour size - float
+        Smax: maximum allowed tumour size - float
+        NSIM: number of fCpG loci to simulate - int
+    Returns:
+        Log likelihood per data point at a given set of parameters
+    """
+
+    tau1 = T * tau1_rel
+    theta2 = theta2_rel * theta1
+    tau2 = T - (T - tau1) * theta1 / theta2 - logit(frac) / theta2
+
+    if tau2 <= tau1:
+        raise ValueError("tau2 must be after tau1")
+    elif tau2 >= T:
+        raise ValueError("tau2 must be before T")
+    
+    Stot = np.exp(theta2 * (T-tau2)) + np.exp(theta1 * (T-tau1))
+    if Stot >= np.iinfo(int).max:
+        raise OverflowError("The number of cells will overflow")
+
+    nu = nu_rel * mu
+    zeta = zeta_rel * gamma
+
+    # # calucalate p(z| mu, gamma)
+
+    betaProb = stochastic_growth_subclonal(theta1, theta2, rho, tau1, tau2, mu, gamma, 
+                                nu, zeta, contam_meth, T, NSIM)
+
+    betaScaled = rescale_beta(betaProb, delta, eta)
+    hist, bin_edges = np.histogram(betaScaled, np.linspace(0, 1, 101))
+    betaCentres = bin_edges[:-1] + (bin_edges[1:] - bin_edges[:-1]) / 2
+
+    # transform the mean and shape parameters to the ones scipy supports
+    alpha, beta = beta_convert_params(betaCentres, kappa)
+
+    # calculate log(p(y|z))
+    lpk = beta_lpdf(y, alpha, beta)
+
+    # calculate penalisation that limits the final tumour size to realistic ranges
+    logPenalise = logsumexp([-Smin / Stot, 
+                                -Smax / Stot], 
+                            b=[1, -1])
+
+    # calculate the bias due to having a finite NSIM
+    logBias = (0.5 + 0.005 * kappa ** (4/3)) / NSIM - np.log(NSIM)
+
+    # p(y| mu, gamma) = sum(p(y|z)*p(z| mu, gamma))
+    # on the log scale this requires logsumexp 
+    LL = logsumexp(lpk, axis = 0, b = hist[:, np.newaxis]) + logPenalise + logBias
+
+    return LL
+
+def loglikelihood_subclonal(params, y, constants):
+    """
+    Estimates the loglikelhood value for fCpG methylation values, y 
+    assuming an independent model
+
+    Arguments:
+        y: fCpG methyaltion data - array of floats
+        params: parameters to calculate LL at - array of floats
+        constants: additional paramaters - array
+    Returns:
+        Log likelihood at a given set of parameters
+    """
+        
+    (theta1, theta2_rel, frac, tau1_rel, mu, gamma, nu_rel, zeta_rel, 
+    contam_meth, delta, eta, kappa) = params
+    rho, T, Smin, Smax, NSIM = constants
+
+    try:
+        LL = np.sum(loglikelihood_perpoint_subclonal(y, theta1, theta2_rel, frac, rho, 
+                                           tau1_rel, mu, gamma, nu_rel, 
+                                           zeta_rel, contam_meth,
+                                           delta, eta, kappa, T, Smin, 
+                                           Smax, NSIM))
+    except (ValueError, OverflowError, RuntimeWarning) as e:
+        LL = -np.inf
+
+    return LL
+
+def loglikelihood_perpoint_independent(y, theta1, theta2_rel, frac, rho, 
+                            tau1_rel, mu1, gamma1, nu1_rel, 
+                            zeta1_rel, clock_rel, contam_meth, 
+                            delta, eta, kappa, T, Smin, 
+                            Smax, NSIM):
+    """
+    Estimates the loglikelhood value per datapoint y assuming an independent model
+
+    Arguments:
+        y: fCpG methyaltion data - array of floats
+        theta: exponential growth rate of population - float
+        rho: tumour purity - float
+        tau_rel: relativeage when population began expanding exponentially 
+                - float < 1
+        mu1: rate to transition from homozygous demethylated to heterozygous
+            in the first cancer - float >= 0
+        gamma1: rate to transition from homozygous methylated to heterozygous
+            in the first cancer - float >= 0
+        nu1_rel: relative rate to transition from heterozygous to homozygous 
+            methylated compared to mu in the first cancer - float >= 0
+        zeta1_rel: relative rate to transition from heterozygous to homozygous 
+            demethylated compared to gamma in the first cancer - float >= 0 
+        clock_rel: relative rate of epigenetic switching rates in the second 
+            cancer compared to the first - float >= 0
+        betaContam: average methylation of non-tumour cells - float
+        delta: offset from zero - float
+        eta: offset from 1 - float
+        kappa: dispersion of beta distributed noise - float > 0
+        T: patient's age - float
+        Smin: minimum allowed tumour size - float
+        Smax: maximum allowed tumour size - float
+        NSIM: number of fCpG loci to simulate - int
+    Returns:
+        Log likelihood per data point at a given set of parameters
+    """
+
+    tau1 = T * tau1_rel
+    theta2 = theta2_rel * theta1
+    tau2 = T - (T - tau1) * theta1 / theta2 - logit(frac) / theta2
+
+    if tau2 <= tau1:
+        raise ValueError("tau2 must be after tau1")
+    elif tau2 >= T:
+        raise ValueError("tau2 must be before T")
+    
+    Stot = np.exp(theta2 * (T-tau2)) + np.exp(theta1 * (T-tau1))
+    if Stot >= np.iinfo(int).max:
+        raise OverflowError("The number of cells will overflow")
+
+    nu1 = nu1_rel * mu1
+    zeta1 = zeta1_rel * gamma1
+
+    mu2 = clock_rel * mu1
+    gamma2 = clock_rel * gamma1
+    nu2 = clock_rel * nu1
+    zeta2 = clock_rel * zeta1
+
+    # # calucalate p(z| mu, gamma)
+
+    betaProb = stochastic_growth_independent(theta1, theta2, rho, tau1, tau2, mu1, gamma1, 
+                                nu1, zeta1, mu2, gamma2, nu2, zeta2, 
+                                contam_meth, T, NSIM)
+
+    betaScaled = rescale_beta(betaProb, delta, eta)
+    hist, bin_edges = np.histogram(betaScaled, np.linspace(0, 1, 101))
+    betaCentres = bin_edges[:-1] + (bin_edges[1:] - bin_edges[:-1]) / 2
+
+    # transform the mean and shape parameters to the ones scipy supports
+    alpha, beta = beta_convert_params(betaCentres, kappa)
+
+    # calculate log(p(y|z))
+    lpk = beta_lpdf(y, alpha, beta)
+
+    # calculate penalisation that limits the final tumour size to realistic ranges
+    logPenalise = logsumexp([-Smin / Stot, 
+                                -Smax / Stot], 
+                            b=[1, -1])
+
+    # calculate the bias due to having a finite NSIM
+    logBias = (0.5 + 0.005 * kappa ** (4/3)) / NSIM - np.log(NSIM)
+
+    # p(y| mu, gamma) = sum(p(y|z)*p(z| mu, gamma))
+    # on the log scale this requires logsumexp 
+    LL = logsumexp(lpk, axis = 0, b = hist[:, np.newaxis]) + logPenalise + logBias
+
+    return LL
+
+def loglikelihood_independent(params, y, constants):
+    """
+    Estimates the loglikelhood value for fCpG methylation values, y 
+    assuming an independent model
+
+    Arguments:
+        y: fCpG methyaltion data - array of floats
+        params: parameters to calculate LL at - array of floats
+        constants: additional paramaters - array
+    Returns:
+        Log likelihood at a given set of parameters
+    """
+        
+    (theta1, theta2_rel, frac, tau1_rel, mu1, gamma1, nu1_rel, zeta1_rel, 
+    clock_rel, contam_meth, delta, eta, kappa) = params
+    rho, T, Smin, Smax, NSIM = constants
+
+    try:
+        LL = np.sum(loglikelihood_perpoint_independent(y, theta1, theta2_rel, frac, rho, 
+                                           tau1_rel, mu1, gamma1, nu1_rel, 
+                                           zeta1_rel, clock_rel, contam_meth,
+                                           delta, eta, kappa, T, Smin, 
+                                           Smax, NSIM))
+    except (ValueError, OverflowError, RuntimeWarning) as e:
+        LL = -np.inf
+
+    return LL
+
+def generate_data_neutral(params, constants):
     """
     Simulates a set of fCpG methylation values, y 
 
@@ -423,13 +923,42 @@ def generate_data(params, constants):
         betaProb = simulate_contamination(betaCancer, rho, betaContam)
 
         y = add_noise(betaProb, delta, eta, kappa)
+
     except (ValueError, OverflowError, FloatingPointError) as e:
         y = np.full(NSIM, -1)
 
     return y
 
+def generate_data_subclonal(params, constants):
+    """
+    Simulates a set of fCpG methylation values, y 
+
+    Arguments:
+        params: parameters of model - array of floats
+        constants: additional paramaters - array
+    Returns:
+        fCpG methyaltion data
+    """
+    theta, tau_rel, mu, gamma, nu_rel, zeta_rel, betaContam, delta, eta, kappa = params
+    rho, T, Smin, Smax, NSIM = constants
+
+    try:
+        tau = T * tau_rel
+        nu = nu_rel * mu
+        zeta = zeta_rel * gamma
+
+        betaCancer = stochastic_growth(theta, tau, mu, gamma, 
+                                    nu, zeta, T, NSIM)
+        betaProb = simulate_contamination(betaCancer, rho, betaContam)
+
+        y = add_noise(betaProb, delta, eta, kappa)
+        
+    except (ValueError, OverflowError, FloatingPointError) as e:
+        y = np.full(NSIM, -1)
+
+    return y
     
-def prior_transform(flat_prior, scales):
+def prior_transform_neutral(flat_prior, scales):
     # priors for parameters [theta, tau_rel, mu, gamma, nu_rel, 
     #                   zeta_rel, betaContam, delta, eta, kappa]
     prior = np.empty(np.shape(flat_prior))
@@ -462,6 +991,80 @@ def prior_transform(flat_prior, scales):
     
     return prior
 
+def prior_transform_subclonal(flat_prior, scales):
+    # priors for parameters [theta1, theta2_rel, frac, tau1_rel, mu, 
+    # gamma, nu_rel, zeta_rel, contam_meth, delta, eta, kappa]
+    prior = np.empty(np.shape(flat_prior))
+    thetamean, thetastd, muscale, gammascale = scales
+
+    # priors on rho and tau_rel
+    prior[0] = lognormal_ppf(flat_prior[0], thetamean, thetastd)
+    prior[1] = truncnormal_ppf(flat_prior[1], 1, 1,
+                                lb=1.0, ub=np.inf)
+    prior[2:4] = stats.beta.ppf(flat_prior[2:4], 2, 2)
+
+    # priors on mu, gamma
+    prior[4:6] = truncnormal_ppf(flat_prior[4:6], 
+                            np.array([0, 0]), 
+                            np.array([muscale, gammascale]), ub=np.inf)
+
+    # priors on nu_rel, zeta_rel
+    prior[6:8] = lognormal_ppf(flat_prior[6:8], 
+                            np.array([1.0, 1.0]), 
+                            np.array([0.7, 0.7]))
+
+
+    # prior on contam_meth
+    prior[8] = stats.beta.ppf(flat_prior[8], 2, 2)
+
+    # priors on delta, eta
+    prior[9:11] = stats.beta.ppf(flat_prior[9:11], 
+                            np.array([5, 95]),
+                            np.array([95, 5]))
+
+    # priors on kappa     
+    prior[11] = lognormal_ppf(flat_prior[11], 100, 30)
+    
+    return prior
+
+def prior_transform_independent(flat_prior, scales):
+    # priors for parameters [theta1, theta2_rel, frac, tau1_rel, mu1, 
+    # gamma1, nu1_rel, zeta1_rel, clock_rel, contam_meth, delta, eta, kappa]
+    prior = np.empty(np.shape(flat_prior))
+    thetamean, thetastd, muscale, gammascale = scales
+
+    # priors on rho and tau_rel
+    prior[0] = lognormal_ppf(flat_prior[0], thetamean, thetastd)
+    prior[1] = truncnormal_ppf(flat_prior[1], 1, 1,
+                                lb=1.0, ub=np.inf)
+    prior[2:4] = stats.beta.ppf(flat_prior[2:4], 2, 2)
+
+    # priors on mu, gamma
+    prior[4:6] = truncnormal_ppf(flat_prior[4:6], 
+                            np.array([0, 0]), 
+                            np.array([muscale, gammascale]), ub=np.inf)
+
+    # priors on nu_rel, zeta_rel
+    prior[6:8] = lognormal_ppf(flat_prior[6:8], 
+                            np.array([1.0, 1.0]), 
+                            np.array([0.7, 0.7]))
+
+    # priors on clock_rel
+    prior[8] = lognormal_ppf(flat_prior[8], 1.0, 0.7)
+
+    # prior on contam_meth
+    prior[9] = stats.beta.ppf(flat_prior[9], 2, 2)
+
+    # priors on delta, eta
+    prior[10:12] = stats.beta.ppf(flat_prior[10:12], 
+                            np.array([5, 95]),
+                            np.array([95, 5]))
+
+    # priors on kappa     
+    prior[12] = lognormal_ppf(flat_prior[12], 100, 30)
+    
+    return prior
+
 def run_inference(
     y, 
     T, 
@@ -475,7 +1078,8 @@ def run_inference(
     gammascale=0.05, 
     NSIM=None,
     verbose=False,
-    dlogz=0.5
+    dlogz=0.5,
+    mode = 'neutral'
 ):
 
     if NSIM is None:
@@ -487,11 +1091,21 @@ def run_inference(
     constants = [rho, T, Smin, Smax, NSIM] 
     # create dummy functions which takes only the params as an argument to pass
     # to dynesty
-    prior_function = lambda flat_prior: prior_transform(flat_prior, scales)
-    loglikelihood_function = lambda params: loglikelihood(y, params, constants)
-
-    ndims = 10    
-
+    if mode.lower() == 'neutral':
+        prior_function = lambda flat_prior: prior_transform_neutral(flat_prior, scales)
+        loglikelihood_function = lambda params: loglikelihood_neutral(y, params, constants)
+        ndims = 10   
+    elif mode.lower() == 'subclonal':
+        prior_function = lambda flat_prior: prior_transform_subclonal(flat_prior, scales)
+        loglikelihood_function = lambda params: loglikelihood_subclonal(y, params, constants) 
+        ndims = 12
+    elif mode.lower() == 'independent':
+        prior_function = lambda flat_prior: prior_transform_independent(flat_prior, scales)
+        loglikelihood_function = lambda params: loglikelihood_independent(y, params, constants) 
+        ndims = 13
+    else:
+        raise ValueError("mode must be one of 'neutral', 'subclonal' or 'independent")
+    
     t0 = time()
     Ncores = cpu_count()
     print(f'Performing Dynesty sampling with {Ncores} threads')
