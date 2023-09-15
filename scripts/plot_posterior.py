@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import pandas as pd
-from flipflopblood import flipflopblood as fb
+from evoflux import evoflux as fb
 import os
 import joblib
 import dynesty
