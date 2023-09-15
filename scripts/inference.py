@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 
 import pandas as pd
-from flipflopblood import flipflopblood as fb
+from evoflux import evoflux as fb
 import os
 import joblib
 
 import argparse
 
 def main():
-    parser = argparse.ArgumentParser(description='Run flipflopblood Bayesian inference.')
+    parser = argparse.ArgumentParser(description='Run EVO-FLUX Bayesian inference.')
     parser.add_argument('datafile', type=str,
                         help='path to csv containing beta values')
     parser.add_argument('patientinfofile', type=str,

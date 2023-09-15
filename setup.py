@@ -7,19 +7,19 @@ import glob
 scripts = glob.glob("scripts/*.py")
 
 setup(
-    name="flipflopblood",
-    url="https://github.com/CalumGabbutt/flipflopblood",
+    name="evoflux",
+    url="https://github.com/CalumGabbutt/evoflux",
     version=1.0,
     author="Calum Gabbutt",
     author_email="calum.gabbutt@icr.ac.uk",
-    packages=["flipflopblood"],
-    license="MIT",
+    packages=["evoflux"],
+    license="MIT", # <- change this!
     scripts=scripts,
-    description=("A Bayesian pipeline to infer stem cell"
+    description=("A Bayesian pipeline to infer a cancer's evolutionary history"
                  "dynamics from methylation array data."),
     install_requires=["numpy", "scipy", "matplotlib", "pandas", 
                     "dynesty", "joblib", "seaborn", "arviz"],
     package_data={
-        "flipflopblood": ["files/*"],
+        "evoflux": ["files/*"],
     }
 )
