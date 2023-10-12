@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import pandas as pd
-from evoflux import evoflux as fb
+from evoflux import evoflux as ev
 import os
 import joblib
 
@@ -36,6 +36,12 @@ def main():
                         help='Number of simulated fCpG loci per run (default:len(y))')
     parser.add_argument('-dlogz', default=0.5, type = float,
                         help='dlogz stopping criteria (default:0.5)')   
+    parser.add_argument('-mode', default='neutral', 
+                        help='Model evolutionary mode (default:neutral)')   
+    parser.add_argument('-sample_meth', default='auto', 
+                        help='Sampling method (default:auto)')   
+    parser.add_argument('-Ncores', default=None, 
+                        help='Number of cores to use (default:cpu_count())')   
 
     # Execute the parse_args() method
     args = parser.parse_args()
@@ -53,7 +59,10 @@ def main():
     muscale=float(args.muscale)
     gammascale=float(args.gammascale)
     NSIM = args.NSIM
-    dlogz = float(dlogz)
+    dlogz = float(args.dlogz)
+    mode = args.mode
+    sample_meth = args.sample_meth
+    Ncores = args.Ncores
 
     outsamplesdir = os.path.join(outputdir, sample)
     outsamples = os.path.join(outsamplesdir, f'{sample}_posterior.pkl')
@@ -63,19 +72,20 @@ def main():
     beta_values = pd.read_csv(datafile, index_col = 0)
     patientinfo = pd.read_csv(patientinfofile, index_col = 0) 
 
-    beta = beta_values[sample].dropna().values
-    T = patientinfo.loc[sample, 'Age']
+    y = beta_values[sample].dropna().values
+    T = patientinfo.loc[sample, 'AGE_SAMPLING']
 
-    rho = patientinfo.loc[sample, 'Purity.Methylation(B-cell.proportion)']
+    rho = patientinfo.loc[sample, 'PURITY_TUMOR_CONSENSUS'] / 100
 
-    if NSIM is None:
-        NSIM = len(beta)
-        print(f'{NSIM} samples per stochastic run')
-    else:
-        NSIM = int(NSIM)
+    if rho < 0.6:
+        print("""
+              Purity is assumed to be a percentage and EVOFLUx works best with 
+              high purity samples, ensure you haven't given purity as a fraction! 
+              """)
 
-    res = fb.run_inference(beta, 
+    res = ev.run_inference(y, 
                             T, 
+                            outsamples,
                             rho=rho,
                             Smin=Smin,
                             Smax=Smax,
@@ -86,10 +96,12 @@ def main():
                             gammascale=gammascale, 
                             NSIM=NSIM,
                             verbose=verbose,
-                            dlogz=dlogz)
-
-    with open(outsamples, 'wb') as f:
-        joblib.dump(res, f)
+                            dlogz=dlogz, 
+                            mode=mode,
+                            sample_meth=sample_meth,
+                            Ncores=Ncores)
+    
+    ev.extract_posterior(res, mode, outsamplesdir, sample)
 
 if __name__ == "__main__":
     main()

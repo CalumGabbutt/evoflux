@@ -1,15 +1,16 @@
 #!/bin/sh
 
-datafile=data/CLL_beta_noob_subset_fcpgs.csv
+datafile=data/beta_fcpgs.csv
 patientinfofile=data/BloodMethMetadata.csv
-outputdir=examples
-samplename=CLL.1
-nlive=300
-thetamean=3
-thetastd=2
-
+mode=neutral
+outputdir=examples/$mode
+samplename=SCLL-059
+nlive=100
+NSIM=2000
+sample_meth=rwalk
 mkdir -p ${outputdir}
 
-inference.py $datafile $patientinfofile $outputdir $samplename --verbose -nlive $nlive -thetamean $thetamean -thetastd $thetastd
+inference.py $datafile $patientinfofile $outputdir $samplename --verbose -nlive $nlive -NSIM $NSIM -sample_meth $sample_meth -mode $mode
 
-plot_posterior.py $datafile $patientinfofile $outputdir $samplename -thetamean $thetamean -thetastd $thetastd
+plot_posterior.py $datafile $patientinfofile $outputdir $samplename -NSIM $NSIM -mode $mode
+calculate_loo.py $datafile $patientinfofile $outputdir $samplename -mode $mode
