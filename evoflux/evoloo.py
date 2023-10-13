@@ -16,7 +16,7 @@ def calculate_loglikelihood(y, res_samples, constants, mode, outsamplesdir,
 
     loglfile = os.path.join(outsamplesdir, f'{sample}_loglikelihood.csv')
 
-    if os.path.exists(loglfile) or overwrite:
+    if os.path.exists(loglfile) and not overwrite:
         print('Log-likelihood file already exists')
         logl = pd.read_csv(loglfile, header = None).values
     else:
@@ -70,6 +70,7 @@ def calculate_loo(
     mode = 'neutral',
     Ncores = None,
     overwrite = False,
+    save = True
 ):
     N = len(y)
 
@@ -92,12 +93,14 @@ def calculate_loo(
     logl = calculate_loglikelihood(y, res_samples, constants, mode,
                                 outsamplesdir, sample, Ncores, overwrite)
     
-    posterior = ev.extract_posterior(res, mode, outsamplesdir, sample)
+    posterior = ev.extract_posterior(res, mode, outsamplesdir, sample, 
+                                     overwrite)
     ndims = posterior.shape[1]
     pos = posterior.values[np.newaxis, :, :]    
     idx = calculate_posterior_idx(posterior, res_samples)
     
-    Ndraws = np.shape(res_samples)[0]
+    # Ndraws = np.shape(res_samples)[0]
+    Ndraws = posterior.shape[0]
     y_hat = np.empty((1, Ndraws, N))
     LL = np.empty((1, Ndraws, N))
 
@@ -120,17 +123,21 @@ def calculate_loo(
                     log_likelihood={"log_likelihood":LL}
                 )     
 
-    netcdf = az.to_netcdf(inference, os.path.join(outsamplesdir, f'{sample}_fit.nc'))
+    if save:
+        netcdf = az.to_netcdf(inference, os.path.join(outsamplesdir, f'{sample}_fit.nc'))
 
     data_loo = az.loo(inference, pointwise=True)
     khat = az.plot_khat(data_loo, show_bins=True)
-    plt.savefig(os.path.join(outsamplesdir, f'{sample}_khat.png'), dpi=300)
-    plt.close()
+    if save:
+        plt.savefig(os.path.join(outsamplesdir, f'{sample}_khat.png'), dpi=300)
+        plt.close()
+
+    return inference
 
 def load_inference(inference_path):
     return az.from_netcdf(inference_path)
 
-def model_selection(inference_list, outputdir, sample, labels=None):
+def model_selection(inference_list, outputdir, sample, labels=None, save=True):
 
     if labels is not None:
         if len(inference_list) != len(labels):
@@ -160,9 +167,10 @@ def model_selection(inference_list, outputdir, sample, labels=None):
     plt.ylabel("Probability density")
     plt.title(sample)
     plt.tight_layout()
-    plt.savefig(os.path.join(outputdir, f"{sample}_compare_pospred.png"), 
-                dpi = 600)
-    plt.close()
+    if save:
+        plt.savefig(os.path.join(outputdir, f"{sample}_compare_pospred.png"), 
+                    dpi = 600)
+        plt.close()
 
     if labels is None:
         compare_dict = {f"model {i}":inference for i, inference in enumerate(inference_list)}
@@ -171,8 +179,12 @@ def model_selection(inference_list, outputdir, sample, labels=None):
 
     model_compare = az.compare(compare_dict, ic="loo", method="BB-pseudo-BMA", scale="log")
 
-    model_compare.to_csv(os.path.join(outputdir, f'{sample}_model_compare.csv'))
+    if save:
+        model_compare.to_csv(os.path.join(outputdir, f'{sample}_model_compare.csv'))
 
     az.plot_compare(model_compare)
-    plt.savefig(os.path.join(outputdir, f'{sample}_model_elpd.png'), dpi=600)
-    plt.close()
+    if save:
+        plt.savefig(os.path.join(outputdir, f'{sample}_model_elpd.png'), dpi=600)
+        plt.close()
+
+    return model_compare

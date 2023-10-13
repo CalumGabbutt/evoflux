@@ -25,7 +25,7 @@ def main():
 
     inference_list = [el.load_inference(p) for p in inference_paths]
 
-    el.model_selection(inference_list, outputdir, sample, labels)
+    model_compare = el.model_selection(inference_list, outputdir, sample, labels)
 
 if __name__ == "__main__":
     main()

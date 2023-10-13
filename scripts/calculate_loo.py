@@ -64,7 +64,7 @@ def main():
     else:
         NSIM = int(NSIM)
 
-    el.calculate_loo(y, T, outsamplesdir, sample,
+    inference = el.calculate_loo(y, T, outsamplesdir, sample,
                     rho=rho, Smin=Smin, Smax=Smax,
                     NSIM=NSIM, mode=mode, 
                     Ncores = Ncores, overwrite=overwrite)

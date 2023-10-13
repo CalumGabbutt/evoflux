@@ -12,8 +12,9 @@ import numpy as np
 import arviz as az
 import corner
 
-def plot_posterior_predictive(y, df, constants, mode, outsamplesdir, sample, Ncores=1):
-    
+def plot_posterior_predictive(y, df, constants, mode, outsamplesdir, sample, Ncores=1,
+                              save = True):
+
     generate_data_wrapper = lambda params: ev.generate_data(params, constants, mode)
 
     if Ncores > 1:
@@ -30,10 +31,11 @@ def plot_posterior_predictive(y, df, constants, mode, outsamplesdir, sample, Nco
     plt.title(sample)
     sns.despine()
     plt.tight_layout()
-    plt.savefig(os.path.join(outsamplesdir, f"{sample}_posterior_predictive.png"), dpi = 600)
-    plt.close()
+    if save:
+        plt.savefig(os.path.join(outsamplesdir, f"{sample}_posterior_predictive.png"), dpi = 600)
+        plt.close()
 
-def plot_prior_shrinkage(df, scales, mode, outsamplesdir, sample):
+def plot_prior_shrinkage(df, scales, mode, outsamplesdir, sample, save = True):
 
     if mode.lower() == 'neutral':
         prior_function = lambda flat_prior: ev.prior_transform_neutral(flat_prior, scales)
@@ -55,31 +57,35 @@ def plot_prior_shrinkage(df, scales, mode, outsamplesdir, sample):
         axes[i].set_ylabel('')
     axes[0].set_ylabel('Probability Density')
     plt.tight_layout()
-    plt.savefig(os.path.join(outsamplesdir, f"{sample}_posterior_shrinkage.png"), dpi = 600)
-    plt.close()
+    if save:
+        plt.savefig(os.path.join(outsamplesdir, f"{sample}_posterior_shrinkage.png"), dpi = 600)
+        plt.close()
 
-def plot_trace(res, outsamplesdir, sample, labels):
+def plot_trace(res, outsamplesdir, sample, labels, save = True):
     fig, axes = dyplot.traceplot(res, show_titles=True,
                                 trace_cmap='viridis', connect=True,
                                 connect_highlight=range(5), labels=labels)
     plt.tight_layout()
-    plt.savefig(os.path.join(outsamplesdir, f'{sample}_traceplot.png'), dpi=600)
-    plt.close()
+    if save:
+        plt.savefig(os.path.join(outsamplesdir, f'{sample}_traceplot.png'), dpi=600)
+        plt.close()
 
-def plot_cornerplot(res, outsamplesdir, sample, labels):
+def plot_cornerplot(res, outsamplesdir, sample, labels, save = True):
     # plot dynesty cornerplot
     fig, ax = dyplot.cornerplot(res, color='blue', show_titles=True,
                             max_n_ticks=3, quantiles=None, labels=labels)
     plt.tight_layout()
-    plt.savefig(os.path.join(outsamplesdir, f'{sample}_cornerplot.png'), dpi=600)
-    plt.close()
+    if save:
+        plt.savefig(os.path.join(outsamplesdir, f'{sample}_cornerplot.png'), dpi=600)
+        plt.close()
 
-def plot_corner(df, outsamplesdir, sample):
+def plot_corner(df, outsamplesdir, sample, save = True):
     # Make the base corner plot
     figure = corner.corner(df.values, bins=7, smooth=1, labels=df.columns)
     plt.tight_layout()
-    plt.savefig(os.path.join(outsamplesdir, f'{sample}_pairs.png'), dpi=600)
-    plt.close()
+    if save:
+        plt.savefig(os.path.join(outsamplesdir, f'{sample}_pairs.png'), dpi=600)
+        plt.close()
 
 def plot_all(
     y, 
