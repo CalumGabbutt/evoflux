@@ -1,9 +1,14 @@
 from scipy import stats, linalg
 import numpy as np
-from scipy.special import logsumexp, gammaln, logit
+import pandas as pd
+import os
+from scipy.special import logsumexp, gammaln, logit, softmax
 from time import time
+import dynesty
 from dynesty import NestedSampler
+from dynesty.results import print_fn
 from multiprocess import Pool, cpu_count
+import joblib
 
 def generate_next_timepoint(m, k, w, mu, gamma, nu, zeta, S, dt, rng=None):
     """
@@ -580,9 +585,7 @@ def beta_lpdf(y, alpha, beta):
 
     return lpk
 
-def loglikelihood_perpoint_neutral(y, theta, rho, tau_rel, mu, gamma, nu_rel, zeta_rel,
-                            betaContam, delta, eta, kappa, 
-                            T, Smin, Smax, NSIM):
+def loglikelihood_perpoint_neutral(y, params, constants):
     """
     Estimates the loglikelhood value per datapoint y assuming a neutral model
 
@@ -611,6 +614,9 @@ def loglikelihood_perpoint_neutral(y, theta, rho, tau_rel, mu, gamma, nu_rel, ze
     Returns:
         Log likelihood per data point at a given set of parameters
     """
+    (theta, tau_rel, mu, gamma, nu_rel, zeta_rel, betaContam, delta,
+                                        eta, kappa) = params
+    rho, T, Smin, Smax, NSIM = constants
 
     tau = T * tau_rel
     nu = nu_rel * mu
@@ -647,42 +653,12 @@ def loglikelihood_perpoint_neutral(y, theta, rho, tau_rel, mu, gamma, nu_rel, ze
 
     # p(y| mu, gamma) = sum(p(y|z)*p(z| mu, gamma))
     # on the log scale this requires logsumexp 
-    LL = (logsumexp(lpk, axis = 0, b = hist[:, np.newaxis]) + 
+    logl = (logsumexp(lpk, axis = 0, b = hist[:, np.newaxis]) + 
             logPenalise - np.log(NSIM) + logBias)
 
-    return LL
+    return logl
 
-def loglikelihood_neutral(y, params, constants):
-    """
-    Estimates the loglikelhood value for fCpG methylation values, y 
-    assuming a neutral model
-
-    Arguments:
-        y: fCpG methyaltion data - array of floats
-        params: parameters to calculate LL at - array of floats
-        constants: additional paramaters - array
-    Returns:
-        Log likelihood at a given set of parameters
-    """
-    (theta, tau_rel, mu, gamma, nu_rel, zeta_rel, betaContam, delta,
-                                        eta, kappa) = params
-    rho, T, Smin, Smax, NSIM = constants
-
-    try:
-        LL = np.sum(loglikelihood_perpoint_neutral(y, theta, rho, 
-                            tau_rel, mu, gamma, nu_rel, zeta_rel, 
-                            betaContam, delta, eta, kappa, T, Smin,
-                            Smax, NSIM))
-    except (ValueError, OverflowError, FloatingPointError) as e:
-        LL = -np.inf
-
-    return LL
-
-def loglikelihood_perpoint_subclonal(y, theta1, theta2_rel, frac, rho, 
-                            tau1_rel, mu, gamma, nu_rel, 
-                            zeta_rel, contam_meth, 
-                            delta, eta, kappa, T, Smin, 
-                            Smax, NSIM):
+def loglikelihood_perpoint_subclonal(y, params, constants):
     """
     Estimates the loglikelhood value per datapoint y assuming an independent model
 
@@ -712,6 +688,10 @@ def loglikelihood_perpoint_subclonal(y, theta1, theta2_rel, frac, rho,
         Log likelihood per data point at a given set of parameters
     """
 
+    (theta1, theta2_rel, frac, tau1_rel, mu, gamma, nu_rel, zeta_rel, 
+    betaContam, delta, eta, kappa) = params
+    rho, T, Smin, Smax, NSIM = constants
+
     tau1 = T * tau1_rel
     theta2 = theta2_rel * theta1
     tau2 = T - (T - tau1) * theta1 / theta2 - logit(frac) / theta2
@@ -730,8 +710,9 @@ def loglikelihood_perpoint_subclonal(y, theta1, theta2_rel, frac, rho,
 
     # # calucalate p(z| mu, gamma)
 
-    betaProb = stochastic_growth_subclonal(theta1, theta2, rho, tau1, tau2, mu, gamma, 
-                                nu, zeta, contam_meth, T, NSIM)
+    betaCancer = stochastic_growth_subclonal(theta1, theta2, tau1, tau2, mu,
+                                gamma, nu, zeta, T, NSIM)
+    betaProb = simulate_contamination(betaCancer, rho, betaContam)
 
     betaScaled = rescale_beta(betaProb, delta, eta)
     hist, bin_edges = np.histogram(betaScaled, np.linspace(0, 1, 101))
@@ -753,43 +734,11 @@ def loglikelihood_perpoint_subclonal(y, theta1, theta2_rel, frac, rho,
 
     # p(y| mu, gamma) = sum(p(y|z)*p(z| mu, gamma))
     # on the log scale this requires logsumexp 
-    LL = logsumexp(lpk, axis = 0, b = hist[:, np.newaxis]) + logPenalise + logBias
+    logl = logsumexp(lpk, axis = 0, b = hist[:, np.newaxis]) + logPenalise + logBias
 
-    return LL
+    return logl
 
-def loglikelihood_subclonal(params, y, constants):
-    """
-    Estimates the loglikelhood value for fCpG methylation values, y 
-    assuming an independent model
-
-    Arguments:
-        y: fCpG methyaltion data - array of floats
-        params: parameters to calculate LL at - array of floats
-        constants: additional paramaters - array
-    Returns:
-        Log likelihood at a given set of parameters
-    """
-        
-    (theta1, theta2_rel, frac, tau1_rel, mu, gamma, nu_rel, zeta_rel, 
-    contam_meth, delta, eta, kappa) = params
-    rho, T, Smin, Smax, NSIM = constants
-
-    try:
-        LL = np.sum(loglikelihood_perpoint_subclonal(y, theta1, theta2_rel, frac, rho, 
-                                           tau1_rel, mu, gamma, nu_rel, 
-                                           zeta_rel, contam_meth,
-                                           delta, eta, kappa, T, Smin, 
-                                           Smax, NSIM))
-    except (ValueError, OverflowError, RuntimeWarning) as e:
-        LL = -np.inf
-
-    return LL
-
-def loglikelihood_perpoint_independent(y, theta1, theta2_rel, frac, rho, 
-                            tau1_rel, mu1, gamma1, nu1_rel, 
-                            zeta1_rel, clock_rel, contam_meth, 
-                            delta, eta, kappa, T, Smin, 
-                            Smax, NSIM):
+def loglikelihood_perpoint_independent(y, params, constants):
     """
     Estimates the loglikelhood value per datapoint y assuming an independent model
 
@@ -821,6 +770,10 @@ def loglikelihood_perpoint_independent(y, theta1, theta2_rel, frac, rho,
         Log likelihood per data point at a given set of parameters
     """
 
+    (theta1, theta2_rel, frac, tau1_rel, mu1, gamma1, nu1_rel, zeta1_rel, 
+    clock_rel, betaContam, delta, eta, kappa) = params
+    rho, T, Smin, Smax, NSIM = constants
+
     tau1 = T * tau1_rel
     theta2 = theta2_rel * theta1
     tau2 = T - (T - tau1) * theta1 / theta2 - logit(frac) / theta2
@@ -844,10 +797,10 @@ def loglikelihood_perpoint_independent(y, theta1, theta2_rel, frac, rho,
 
     # # calucalate p(z| mu, gamma)
 
-    betaProb = stochastic_growth_independent(theta1, theta2, rho, tau1, tau2, mu1, gamma1, 
-                                nu1, zeta1, mu2, gamma2, nu2, zeta2, 
-                                contam_meth, T, NSIM)
-
+    betaCancer = stochastic_growth_independent(theta1, theta2, tau1, tau2, mu1, gamma1, 
+                        nu1, zeta1, mu2, gamma2, nu2, zeta2, T, NSIM)
+    betaProb = simulate_contamination(betaCancer, rho, betaContam)
+    
     betaScaled = rescale_beta(betaProb, delta, eta)
     hist, bin_edges = np.histogram(betaScaled, np.linspace(0, 1, 101))
     betaCentres = bin_edges[:-1] + (bin_edges[1:] - bin_edges[:-1]) / 2
@@ -868,33 +821,35 @@ def loglikelihood_perpoint_independent(y, theta1, theta2_rel, frac, rho,
 
     # p(y| mu, gamma) = sum(p(y|z)*p(z| mu, gamma))
     # on the log scale this requires logsumexp 
-    LL = logsumexp(lpk, axis = 0, b = hist[:, np.newaxis]) + logPenalise + logBias
+    logl = logsumexp(lpk, axis = 0, b = hist[:, np.newaxis]) + logPenalise + logBias
 
-    return LL
+    return logl
 
-def loglikelihood_independent(params, y, constants):
-    """
-    Estimates the loglikelhood value for fCpG methylation values, y 
-    assuming an independent model
+def loglikelihood_perpoint(y, params, constants, mode):
+    if mode.lower() == 'neutral':
+        try:
+            logl = loglikelihood_perpoint_neutral(y, params, constants)
+        except (ValueError, OverflowError, RuntimeWarning, FloatingPointError) as e:
+            logl = np.full(len(y), -np.inf)
 
-    Arguments:
-        y: fCpG methyaltion data - array of floats
-        params: parameters to calculate LL at - array of floats
-        constants: additional paramaters - array
-    Returns:
-        Log likelihood at a given set of parameters
-    """
-        
-    (theta1, theta2_rel, frac, tau1_rel, mu1, gamma1, nu1_rel, zeta1_rel, 
-    clock_rel, contam_meth, delta, eta, kappa) = params
-    rho, T, Smin, Smax, NSIM = constants
+    elif mode.lower() == 'subclonal':
+        try:
+            logl = loglikelihood_perpoint_subclonal(y, params, constants)
+        except (ValueError, OverflowError, RuntimeWarning, FloatingPointError) as e:
+            logl = np.full(len(y), -np.inf)
+    elif mode.lower() == 'independent':
+        try:
+            logl = loglikelihood_perpoint_independent(y, params, constants)
+        except (ValueError, OverflowError, RuntimeWarning, FloatingPointError) as e:
+            logl = np.full(len(y), -np.inf)
+    else:
+        raise ValueError("mode must be one of 'neutral', 'subclonal' or 'independent")
 
+    return logl
+
+def loglikelihood(y, params, constants, mode):
     try:
-        LL = np.sum(loglikelihood_perpoint_independent(y, theta1, theta2_rel, frac, rho, 
-                                           tau1_rel, mu1, gamma1, nu1_rel, 
-                                           zeta1_rel, clock_rel, contam_meth,
-                                           delta, eta, kappa, T, Smin, 
-                                           Smax, NSIM))
+        LL = np.sum(loglikelihood_perpoint(y, params, constants, mode))
     except (ValueError, OverflowError, RuntimeWarning) as e:
         LL = -np.inf
 
@@ -939,16 +894,20 @@ def generate_data_subclonal(params, constants):
     Returns:
         fCpG methyaltion data
     """
-    theta, tau_rel, mu, gamma, nu_rel, zeta_rel, betaContam, delta, eta, kappa = params
+    (theta1, theta2_rel, frac, tau1_rel, mu, gamma, nu_rel, zeta_rel, 
+    betaContam, delta, eta, kappa) = params
     rho, T, Smin, Smax, NSIM = constants
 
     try:
-        tau = T * tau_rel
+        tau1 = T * tau1_rel
+        theta2 = theta2_rel * theta1
+        tau2 = T - (T - tau1) * theta1 / theta2 - logit(frac) / theta2
+
         nu = nu_rel * mu
         zeta = zeta_rel * gamma
 
-        betaCancer = stochastic_growth(theta, tau, mu, gamma, 
-                                    nu, zeta, T, NSIM)
+        betaCancer = stochastic_growth_subclonal(theta1, theta2, tau1, tau2, mu,
+                                gamma, nu, zeta, T, NSIM)
         betaProb = simulate_contamination(betaCancer, rho, betaContam)
 
         y = add_noise(betaProb, delta, eta, kappa)
@@ -957,6 +916,59 @@ def generate_data_subclonal(params, constants):
         y = np.full(NSIM, -1)
 
     return y
+
+def generate_data_independent(params, constants):
+    """
+    Simulates a set of fCpG methylation values, y 
+
+    Arguments:
+        params: parameters of model - array of floats
+        constants: additional paramaters - array
+    Returns:
+        fCpG methyaltion data
+    """
+    (theta1, theta2_rel, frac, tau1_rel, mu1, gamma1, nu1_rel, zeta1_rel, 
+    clock_rel, betaContam, delta, eta, kappa) = params
+    rho, T, Smin, Smax, NSIM = constants
+
+    try:
+        tau1 = T * tau1_rel
+        theta2 = theta2_rel * theta1
+        tau2 = T - (T - tau1) * theta1 / theta2 - logit(frac) / theta2
+
+        nu1 = nu1_rel * mu1
+        zeta1 = zeta1_rel * gamma1
+
+        mu2 = clock_rel * mu1
+        gamma2 = clock_rel * gamma1
+        nu2 = clock_rel * nu1
+        zeta2 = clock_rel * zeta1
+
+        betaCancer = stochastic_growth_independent(theta1, theta2, tau1, tau2, mu1, gamma1, 
+                        nu1, zeta1, mu2, gamma2, nu2, zeta2, T, NSIM)
+        betaProb = simulate_contamination(betaCancer, rho, betaContam)
+
+        y = add_noise(betaProb, delta, eta, kappa)
+        
+    except (ValueError, OverflowError, FloatingPointError) as e:
+        y = np.full(NSIM, -1)
+
+    return y
+
+def generate_data(params, constants, mode):
+    if mode.lower() == 'neutral':
+        y_hat = generate_data_neutral(params, constants)
+
+    elif mode.lower() == 'subclonal':
+        y_hat = generate_data_subclonal(params, constants)
+
+    elif mode.lower() == 'independent':
+        y_hat = generate_data_independent(params, constants)
+
+    else:
+        raise ValueError("mode must be one of 'neutral', 'subclonal' or 'independent")
+
+    return y_hat
     
 def prior_transform_neutral(flat_prior, scales):
     # priors for parameters [theta, tau_rel, mu, gamma, nu_rel, 
@@ -973,7 +985,7 @@ def prior_transform_neutral(flat_prior, scales):
                             np.array([0, 0]), 
                             np.array([muscale, gammascale]), ub=np.inf)
 
-    # priors on mu, gamma
+    # priors on nu_rel, zeta_rel
     prior[4:6] = lognormal_ppf(flat_prior[4:6], 
                             np.array([1.0, 1.0]), 
                             np.array([0.7, 0.7]))
@@ -993,7 +1005,7 @@ def prior_transform_neutral(flat_prior, scales):
 
 def prior_transform_subclonal(flat_prior, scales):
     # priors for parameters [theta1, theta2_rel, frac, tau1_rel, mu, 
-    # gamma, nu_rel, zeta_rel, contam_meth, delta, eta, kappa]
+    # gamma, nu_rel, zeta_rel, betaContam, delta, eta, kappa]
     prior = np.empty(np.shape(flat_prior))
     thetamean, thetastd, muscale, gammascale = scales
 
@@ -1014,7 +1026,7 @@ def prior_transform_subclonal(flat_prior, scales):
                             np.array([0.7, 0.7]))
 
 
-    # prior on contam_meth
+    # prior on betaContam
     prior[8] = stats.beta.ppf(flat_prior[8], 2, 2)
 
     # priors on delta, eta
@@ -1029,7 +1041,7 @@ def prior_transform_subclonal(flat_prior, scales):
 
 def prior_transform_independent(flat_prior, scales):
     # priors for parameters [theta1, theta2_rel, frac, tau1_rel, mu1, 
-    # gamma1, nu1_rel, zeta1_rel, clock_rel, contam_meth, delta, eta, kappa]
+    # gamma1, nu1_rel, zeta1_rel, clock_rel, betaContam, delta, eta, kappa]
     prior = np.empty(np.shape(flat_prior))
     thetamean, thetastd, muscale, gammascale = scales
 
@@ -1052,7 +1064,7 @@ def prior_transform_independent(flat_prior, scales):
     # priors on clock_rel
     prior[8] = lognormal_ppf(flat_prior[8], 1.0, 0.7)
 
-    # prior on contam_meth
+    # prior on betaContam
     prior[9] = stats.beta.ppf(flat_prior[9], 2, 2)
 
     # priors on delta, eta
@@ -1065,9 +1077,67 @@ def prior_transform_independent(flat_prior, scales):
     
     return prior
 
+def prior_transform(flat_prior, scales, mode):
+
+    if mode.lower() == 'neutral':
+        prior = prior_transform_neutral(flat_prior, scales)
+
+    elif mode.lower() == 'subclonal':
+        prior = prior_transform_subclonal(flat_prior, scales)
+
+    elif mode.lower() == 'independent':
+        prior = prior_transform_independent(flat_prior, scales)
+
+    else:
+        raise ValueError("mode must be one of 'neutral', 'subclonal' or 'independent")
+
+    return prior
+
+def number_params(mode):
+    number_params = {'neutral':10,
+                    'subclonal':12,
+                    'independent':13}
+    
+    if mode in number_params.keys():
+        ndims = number_params[mode]
+    else:
+        raise ValueError("mode must be one of 'neutral', 'subclonal' or 'independent")
+    
+    return ndims
+
+def extract_posterior(res, mode, outsamplesdir, sample, overwrite =False):
+    posteriorfile = os.path.join(outsamplesdir, f'{sample}_posterior.csv')
+    if os.path.exists(posteriorfile) and not overwrite:
+        df = pd.read_csv(posteriorfile)
+
+    else:
+        samples =  dynesty.utils.resample_equal(res.samples, 
+                                                softmax(res.logwt))
+
+        if mode.lower() == 'neutral':
+            labels = ["theta", "tau_rel", "mu", "gamma", "nu_rel", "zeta_rel",
+                        "betaContam", "delta", "eta", "kappa"]
+
+        elif mode.lower() == 'subclonal':
+            labels = ["theta1", "theta2_rel", "frac", "tau1_rel", "mu", 
+                        "gamma", "nu_rel", "zeta_rel", "betaContam", "delta", 
+                        "eta", "kappa"]
+        elif mode.lower() == 'independent':
+            labels = ["theta1", "theta2_rel", "frac", "tau1_rel", "mu", 
+                        "gamma", "nu_rel", "zeta_rel", "clock_rel", "betaContam", 
+                        "delta", "eta", "kappa"]
+        else:
+            raise ValueError("mode must be one of 'neutral', 'subclonal' or 'independent")
+
+        df = pd.DataFrame(samples, columns = labels)
+        df.to_csv(posteriorfile, index = False)
+
+    return df
+
 def run_inference(
     y, 
     T, 
+    outsamples,
     rho=1.0,
     Smin=10**2,
     Smax=10**9,
@@ -1079,11 +1149,21 @@ def run_inference(
     NSIM=None,
     verbose=False,
     dlogz=0.5,
-    mode = 'neutral'
+    mode = 'neutral',
+    sample_meth = 'auto',
+    Ncores = None,
 ):
 
     if NSIM is None:
         NSIM = len(y)
+        print(f'{NSIM} samples per stochastic run')
+    else:
+        NSIM = int(NSIM)
+
+    if Ncores is None:
+        Ncores = cpu_count()
+    else:
+        Ncores = int(Ncores)
 
     # set the std of the halfnormal priors on lam, mu, gamma
     scales = [thetamean, thetastd, muscale, gammascale]
@@ -1091,29 +1171,56 @@ def run_inference(
     constants = [rho, T, Smin, Smax, NSIM] 
     # create dummy functions which takes only the params as an argument to pass
     # to dynesty
-    if mode.lower() == 'neutral':
-        prior_function = lambda flat_prior: prior_transform_neutral(flat_prior, scales)
-        loglikelihood_function = lambda params: loglikelihood_neutral(y, params, constants)
-        ndims = 10   
-    elif mode.lower() == 'subclonal':
-        prior_function = lambda flat_prior: prior_transform_subclonal(flat_prior, scales)
-        loglikelihood_function = lambda params: loglikelihood_subclonal(y, params, constants) 
-        ndims = 12
-    elif mode.lower() == 'independent':
-        prior_function = lambda flat_prior: prior_transform_independent(flat_prior, scales)
-        loglikelihood_function = lambda params: loglikelihood_independent(y, params, constants) 
-        ndims = 13
-    else:
-        raise ValueError("mode must be one of 'neutral', 'subclonal' or 'independent")
+    ndims = number_params(mode)
+    loglikelihood_function = lambda params: loglikelihood(y, params, constants, mode) 
+    prior_function = lambda flat_prior: prior_transform(flat_prior, scales, mode)
+    
+    if sample_meth not in ['unif', 'rwalk', 'rslice', 'auto']:
+        raise ValueError("sample_meth must be one of 'unif', 'rwalk', 'rslice' or 'auto'")
     
     t0 = time()
-    Ncores = cpu_count()
+
+    DUMP_EVERY_N = 50
+    LOG_EVERY_N = 20
     print(f'Performing Dynesty sampling with {Ncores} threads')
     with Pool() as pool:
         sampler = NestedSampler(loglikelihood_function, prior_function, ndims,
-                                bound='multi', sample='unif', nlive=nlive, 
+                                bound='multi', sample=sample_meth, nlive=nlive, 
                                 pool=pool, queue_size=Ncores)
-        sampler.run_nested(print_progress=verbose, dlogz=dlogz)
+
+        # continue sampling from where we left off
+        ncall = sampler.ncall  # internal calls
+        nit = sampler.it  # internal iteration
+        for it, results in enumerate(sampler.sample(dlogz=dlogz)):
+            # split up our results
+            (worst, ustar, vstar, loglstar, logvol, logwt, logz, logzvar,
+            h, nc, worst_it, boundidx, bounditer, eff, delta_logz) = results
+            # add number of function calls
+            ncall += nc
+            nit += 1
+
+            if (nit % LOG_EVERY_N) == 0:
+                # print results
+                if verbose:
+                    print_fn(results, nit, ncall, dlogz=dlogz)
+
+            if (nit % DUMP_EVERY_N) == 0:
+                res = sampler.results
+
+                with open(outsamples, 'wb') as f:
+                    joblib.dump(res, f)
+
+        # add the remaining live points back into our final results 
+        # (they are removed from our set of dead points each time we start sampling)
+        for it2, results in enumerate(sampler.add_live_points()):
+            # split up results
+            (worst, ustar, vstar, loglstar, logvol, logwt, logz, logzvar,
+            h, nc, worst_it, boundidx, bounditer, eff, delta_logz) = results
+            # print results
+            print_fn(results, nit, ncall, add_live_it=it2+1, dlogz=dlogz)
+
+    with open(outsamples, 'wb') as f:
+        joblib.dump(res, f)
 
     res = sampler.results
 
@@ -1125,3 +1232,4 @@ def run_inference(
     print(res.summary())
 
     return res
+
