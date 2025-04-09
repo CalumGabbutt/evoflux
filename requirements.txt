@@ -18,7 +18,6 @@ defusedxml==0.7.1
 dill==0.3.7
 dynesty==1.0.1
 entrypoints==0.4
-evoflux==1.0
 exceptiongroup==1.1.3
 fastjsonschema==2.18.1
 fonttools==4.38.0
