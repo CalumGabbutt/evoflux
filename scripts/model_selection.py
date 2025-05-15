@@ -1,5 +1,17 @@
 #!/usr/bin/env python3
 
+"""
+EVOFLUx is © 2025, Calum Gabbutt
+
+EVOFLUx is published and distributed under the Academic Software License v1.0 (ASL).
+
+EVOFLUx is distributed in the hope that it will be useful for non-commercial academic research, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the ASL for more details.
+
+You should have received a copy of the ASL along with this program; if not, email Calum Gabbutt at calum.gabbutt@icr.ac.uk. It is also published at https://github.com/gabor1/ASL/blob/main/ASL.md.
+
+You may contact the original licensor at calum.gabbutt@icr.ac.uk.
+"""
+
 import pandas as pd
 import evoflux.evoloo as el
 import os
