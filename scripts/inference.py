@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
 
+"""
+EVOFLUx is © 2025, Calum Gabbutt
+
+EVOFLUx is published and distributed under the Academic Software License v1.0 (ASL).
+
+EVOFLUx is distributed in the hope that it will be useful for non-commercial academic research, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the ASL for more details.
+
+You should have received a copy of the ASL along with this program; if not, email Calum Gabbutt at calum.gabbutt@icr.ac.uk. It is also published at https://github.com/gabor1/ASL/blob/main/ASL.md.
+
+You may contact the original licensor at calum.gabbutt@icr.ac.uk.
+"""
+
+import warnings
 import pandas as pd
 from evoflux import evoflux as ev
 import os
@@ -10,7 +23,10 @@ import argparse
 def main():
     parser = argparse.ArgumentParser(description='Run EVO-FLUX Bayesian inference.')
     parser.add_argument('datafile', type=str,
-                        help='path to csv containing beta values')
+                        help="""
+                        path to csv containing beta values, the first column is
+                        assumed to be an index
+                        """)
     parser.add_argument('patientinfofile', type=str,
                         help='path to csv containing patientinfo')
     parser.add_argument('outputdir', type=str, default='~', 
@@ -72,12 +88,17 @@ def main():
     beta_values = pd.read_csv(datafile, index_col = 0)
     patientinfo = pd.read_csv(patientinfofile, index_col = 0) 
 
+    if pd.api.types.is_float_dtype(beta_values.index.dtype):
+        warnings.warn(
+            f"The CSV index appears to be floating-point; "
+            "an integer or string index was expected.")
+
     y = beta_values[sample].dropna().values
     T = patientinfo.loc[sample, 'AGE_SAMPLING']
 
     rho = patientinfo.loc[sample, 'PURITY_TUMOR_CONSENSUS'] / 100
 
-    if rho < 0.6:
+    if rho < 1.0:
         print("""
               Purity is assumed to be a percentage and EVOFLUx works best with 
               high purity samples, ensure you haven't given purity as a fraction! 

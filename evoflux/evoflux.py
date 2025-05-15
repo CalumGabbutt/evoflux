@@ -1,3 +1,15 @@
+"""
+EVOFLUx is © 2025, Calum Gabbutt
+
+EVOFLUx is published and distributed under the Academic Software License v1.0 (ASL).
+
+EVOFLUx is distributed in the hope that it will be useful for non-commercial academic research, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the ASL for more details.
+
+You should have received a copy of the ASL along with this program; if not, email Calum Gabbutt at calum.gabbutt@icr.ac.uk. It is also published at https://github.com/gabor1/ASL/blob/main/ASL.md.
+
+You may contact the original licensor at calum.gabbutt@icr.ac.uk.
+"""
+
 from scipy import stats, linalg
 import numpy as np
 import pandas as pd
@@ -592,7 +604,7 @@ def loglikelihood_perpoint_neutral(y, params, constants):
     Arguments:
         y: fCpG methyaltion data - array of floats
         theta: exponential growth rate of population - float
-        rho: tumour purity - float
+        rho: tumour purity - float < 1
         tau_rel: relativeage when population began expanding exponentially 
                 - float < 1
         mu: rate to transition from homozygous demethylated to heterozygous
@@ -665,7 +677,7 @@ def loglikelihood_perpoint_subclonal(y, params, constants):
     Arguments:
         y: fCpG methyaltion data - array of floats
         theta: exponential growth rate of population - float
-        rho: tumour purity - float
+        rho: tumour purity - float < 1
         tau_rel: relativeage when population began expanding exponentially 
                 - float < 1
         mu: rate to transition from homozygous demethylated to heterozygous
@@ -745,7 +757,7 @@ def loglikelihood_perpoint_independent(y, params, constants):
     Arguments:
         y: fCpG methyaltion data - array of floats
         theta: exponential growth rate of population - float
-        rho: tumour purity - float
+        rho: tumour purity - float < 1
         tau_rel: relativeage when population began expanding exponentially 
                 - float < 1
         mu1: rate to transition from homozygous demethylated to heterozygous
@@ -976,7 +988,7 @@ def prior_transform_neutral(flat_prior, scales):
     prior = np.empty(np.shape(flat_prior))
     thetamean, thetastd, muscale, gammascale = scales
 
-    # priors on rho and tau_rel
+    # priors on theta and tau_rel
     prior[0] = lognormal_ppf(flat_prior[0], thetamean, thetastd)
     prior[1] = stats.beta.ppf(flat_prior[1], 2, 2)
 
@@ -1009,7 +1021,7 @@ def prior_transform_subclonal(flat_prior, scales):
     prior = np.empty(np.shape(flat_prior))
     thetamean, thetastd, muscale, gammascale = scales
 
-    # priors on rho and tau_rel
+    # priors on theta and tau_rel
     prior[0] = lognormal_ppf(flat_prior[0], thetamean, thetastd)
     prior[1] = truncnormal_ppf(flat_prior[1], 1, 1,
                                 lb=1.0, ub=np.inf)
@@ -1045,7 +1057,7 @@ def prior_transform_independent(flat_prior, scales):
     prior = np.empty(np.shape(flat_prior))
     thetamean, thetastd, muscale, gammascale = scales
 
-    # priors on rho and tau_rel
+    # priors on theta and tau_rel
     prior[0] = lognormal_ppf(flat_prior[0], thetamean, thetastd)
     prior[1] = truncnormal_ppf(flat_prior[1], 1, 1,
                                 lb=1.0, ub=np.inf)
@@ -1164,6 +1176,9 @@ def run_inference(
         Ncores = cpu_count()
     else:
         Ncores = int(Ncores)
+
+    if (rho > 1) | (rho <= 0):
+        raise ValueError('Tumour purity, rho, must be be between 0 and 1')
 
     # set the std of the halfnormal priors on lam, mu, gamma
     scales = [thetamean, thetastd, muscale, gammascale]
