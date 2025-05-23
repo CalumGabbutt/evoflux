@@ -1,25 +1,23 @@
 """
-EVOFLUx is © 2025, Calum Gabbutt
+Copyright 2025 The Institute of Cancer Research.
 
-EVOFLUx is published and distributed under the Academic Software License v1.0 (ASL).
-
-EVOFLUx is distributed in the hope that it will be useful for non-commercial academic research, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the ASL for more details.
-
-You should have received a copy of the ASL along with this program; if not, email Calum Gabbutt at calum.gabbutt@icr.ac.uk. It is also published at https://github.com/gabor1/ASL/blob/main/ASL.md.
-
-You may contact the original licensor at calum.gabbutt@icr.ac.uk.
+Licensed under a software academic use license provided with this software package (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at: https://github.com/CalumGabbutt/evoflux
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and limitations under the License.
 """
 
 import numpy as np
 from scipy.special import logit
-from scipy.sparse import csc_matrix, diags
+from scipy.sparse import diags
 import time
 import pandas as pd
 import os
 import zipfile
 from zipfile import ZipFile
 
-EVOFLUX_DIR = os.path.dirname(os.path.realpath(__file__))
+EVOFLUX_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 
 def read_largest_tsv_from_zip(zip_filepath):
     """Reads the largest .tsv file from a ZIP archive using ZipFile.
@@ -195,51 +193,47 @@ def calculate_stats(beta_candidate, sampleinfo_training):
 
 def construct_cosine_similarity_graph(X, k=5):
     """
-    Construct a symmetric k-nearest neighbor graph using cosine similarity.
-
-    Each sample is connected to its k nearest neighbors (including itself) based on 
-    cosine similarity. The resulting graph is binary (edges are set to 1) and symmetrized 
-    by taking the element-wise maximum with its transpose.
-
-    Parameters
-    ----------
-    X : np.ndarray, shape (n_samples, n_features)
-        Input data matrix where each row is a sample and each column is a feature.
-        The function normalizes each row to unit length before computing similarity.
-
-    k : int, default=5
-        Number of nearest neighbors to use for constructing the graph (including self).
-
-    Returns
-    -------
-    W : scipy.sparse.csc_matrix, shape (n_samples, n_samples)
-        Sparse, symmetric affinity matrix where W[i, j] = 1 if sample j is among the 
-        k nearest neighbors of sample i or vice versa.
+    Build a k-nearest neighbor similarity graph based on cosine similarity.
+    
+    Parameters:
+    -----------
+    X : numpy.ndarray
+        Input data matrix of shape (n_samples, n_features)
+    k : int
+        Number of nearest neighbors to consider
+        
+    Returns:
+    --------
+    W : numpy.ndarray
+        Symmetric dense affinity matrix of shape (n_samples, n_samples)
     """
-
     n_samples = X.shape[0]
-
-    # Normalize each row to unit norm
-    X_normalized = np.linalg.norm(X, axis=1)
-    X = X / np.maximum(X_normalized[:, np.newaxis], 1e-12)
-
-    # Compute cosine similarity matrix
-    D_cosine = np.dot(X, X.T)
-
-    # Sort similarities in descending order and get top (k+1) indices
+    
+    # Normalize X to unit vectors (L2 normalization)
+    X_normalized = np.power(np.sum(X*X, axis=1), 0.5)
+    for i in range(n_samples):
+        X[i, :] = X[i, :] / max(1e-12, X_normalized[i])
+    
+    # Compute pairwise cosine similarities (dot product of normalized vectors)
+    D_cosine = np.dot(X, np.transpose(X))
+    
+    # Sort the distance matrix D in descending order
     idx = np.argsort(-D_cosine, axis=1)
-    idx_k = idx[:, :k+1]
-
-    # Construct triplet edge list 
-    row_idx = np.tile(np.arange(n_samples), (k+1, 1)).reshape(-1)
-    col_idx = np.ravel(idx_k, order='F')  
-    data = np.ones_like(row_idx, dtype=np.float64)
-
-    # Build sparse affinity matrix
-    W = csc_matrix((data, (row_idx, col_idx)), shape=(n_samples, n_samples))
-
-    # Symmetrize by taking the element-wise maximum
-    W = W.maximum(W.T)
+    
+    # Keep only k+1 nearest neighbors (including self)
+    idx_new = idx[:, 0:k+1]
+    
+    # Build dense affinity matrix W
+    W = np.zeros((n_samples, n_samples))
+    
+    # Fill in the k-nearest neighbor connections
+    for i in range(n_samples):
+        for j in range(k+1):
+            neighbor_idx = idx_new[i, j]
+            W[i, neighbor_idx] = 1
+    
+    # Make the matrix symmetric by taking element-wise maximum
+    W = np.maximum(W, W.T)
 
     return W
 
@@ -260,31 +254,26 @@ def laplacian_score(X, W):
     scores : np.ndarray, shape (n_features,)
         Laplacian scores for each feature. Lower scores indicate more informative features.
     """
-    # Degree matrix D: diagonal with row sums of W
-    D = diags(W.sum(axis=1).A1)
+    # Step 1: Degree matrix D and Laplacian matrix L = W
+    D_row = np.array(W.sum(axis=1)).flatten()
+    D_sum = np.sum(D_row)
+    D = diags(D_row, 0)
 
-    # Graph Laplacian L = D - W
-    L = D - W
+    # Step 2: Precompute matrix multiplications
+    Xt = X.T  # shape: (n_features, n_samples)
+    t1 = (Xt @ D).T  # shape: (n_samples, n_features)
+    t2 = (Xt @ W).T  # shape: (n_samples, n_features)
 
-    # Center features w.r.t. the degree matrix (optional, but improves numerical
-    # stability)
-    XT = X.T  # features x samples
-    D1 = D.diagonal()[:, np.newaxis]
-    D_sum = D1.sum()
-    f_mean = (X.T @ D1).flatten() / D_sum  # degree-weighted mean
-    f_centered = XT - f_mean[:, np.newaxis]
-
-    # Numerator: f^T L f (feature × Laplacian × feature)
-    numerator = np.sum(f_centered * (L @ f_centered.T).T, axis=1)
-
-    # Denominator: f^T D f (feature × degree × feature)
-    denominator = np.sum(f_centered * (D @ f_centered.T).T, axis=1)
+    # Compute numerator and denominator terms per feature
+    tmp = D_row @ X  # shape: (n_features,)
+    D_prime = np.sum(t1 * X, axis=0) - (tmp ** 2) / D_sum
+    L_prime = np.sum(t2 * X, axis=0) - (tmp ** 2) / D_sum
 
     # Avoid divide-by-zero
-    denominator = np.maximum(denominator, 1e-12)
+    D_prime[D_prime < 1e-12] = 10000.0
 
-    scores = numerator / denominator
-    return scores
+    score = 1 - (L_prime / D_prime)
+    return score
 
 def calculate_laplacian_score(beta_candidate):
     """

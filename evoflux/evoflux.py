@@ -1,13 +1,11 @@
 """
-EVOFLUx is © 2025, Calum Gabbutt
+Copyright 2025 The Institute of Cancer Research.
 
-EVOFLUx is published and distributed under the Academic Software License v1.0 (ASL).
-
-EVOFLUx is distributed in the hope that it will be useful for non-commercial academic research, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the ASL for more details.
-
-You should have received a copy of the ASL along with this program; if not, email Calum Gabbutt at calum.gabbutt@icr.ac.uk. It is also published at https://github.com/gabor1/ASL/blob/main/ASL.md.
-
-You may contact the original licensor at calum.gabbutt@icr.ac.uk.
+Licensed under a software academic use license provided with this software package (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at: https://github.com/CalumGabbutt/evoflux
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and limitations under the License.
 """
 
 from scipy import stats, linalg
