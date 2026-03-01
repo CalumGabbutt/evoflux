@@ -27,6 +27,9 @@ def plot_posterior_predictive(y, df, constants, mode, outsamplesdir, sample, Nco
 
     generate_data_wrapper = lambda params: ev.generate_data(params, constants, mode)
 
+    # ensure y is within (0, 1)
+    y = ev.clip_data(y)
+
     if Ncores > 1:
         y_hat = np.vstack(Parallel(n_jobs=Ncores)(delayed(generate_data_wrapper)(s) for s in df.values))
     else:

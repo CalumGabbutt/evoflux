@@ -19,6 +19,7 @@ from dynesty import NestedSampler
 from dynesty.results import print_fn
 from multiprocess import Pool, cpu_count
 import joblib
+import warnings
 
 def generate_next_timepoint(m, k, w, mu, gamma, nu, zeta, S, dt, rng=None):
     """
@@ -1144,6 +1145,38 @@ def extract_posterior(res, mode, outsamplesdir, sample, overwrite =False):
 
     return df
 
+def clip_data(y):
+    """
+    Data-dependent clipping of y into an open interval (0,1).
+
+    Parameters
+    ----------
+    y : array-like
+        Values intended to lie in (0,1).
+
+    """
+    valid = (y > 0.0) & (y < 1.0)
+    if not np.all(valid):
+        if not np.any(valid):
+            raise ValueError("All values of y are outside (0,1).")
+        elif np.mean(valid) <= 0.75:
+            raise ValueError("A surprisingly large fraction of y values are outside (0,1).")
+
+        minval = np.min(y[valid])
+        maxval = np.max(y[valid])
+
+        warnings.warn(
+            f'Data contains values outside (0,1); '
+            f'clipped to [{minval}, {maxval}]'
+        )
+
+        if minval >= maxval:
+            raise ValueError("min(y) >= max(y)")
+        y = np.clip(y, minval, maxval)
+
+    return y
+
+
 def run_inference(
     y, 
     T, 
@@ -1177,6 +1210,9 @@ def run_inference(
 
     if (rho > 1) | (rho <= 0):
         raise ValueError('Tumour purity, rho, must be be between 0 and 1')
+    
+    # ensure y is within (0, 1)
+    y = clip_data(y)
 
     # set the std of the halfnormal priors on lam, mu, gamma
     scales = [thetamean, thetastd, muscale, gammascale]

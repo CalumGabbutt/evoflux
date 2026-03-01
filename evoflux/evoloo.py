@@ -92,6 +92,8 @@ def calculate_loo(
     else:
         Ncores = int(Ncores)
 
+    y = ev.clip_data(y)
+
     constants = [rho, T, Smin, Smax, NSIM] 
 
     outsamples = os.path.join(outsamplesdir, f'{sample}_posterior.pkl')
